@@ -1,0 +1,217 @@
+# ====================================================================================
+#  MASTER CODE: High-Performance PID Line Following Robot
+#  Platform:    Raspberry Pi Pico (MicroPython)
+#  Author:      [Mastermind Coder]
+#  Date:        2025-09-19
+#  Description: This script is precision-engineered for the specified hardware
+#               and wiring diagram. It utilizes a sophisticated PID control
+#               algorithm to achieve maximum speed and accuracy on the track.
+# ====================================================================================
+
+from machine import Pin, PWM
+import time
+
+# ====================================================================================
+# HARDWARE CONFIGURATION (Derived directly from your wiring list)
+# ====================================================================================
+
+# IR SENSORS (5-channel array)
+# Pin connections: GP2 (Leftmost) to GP6 (Rightmost)
+sensor_pins = [
+    Pin(2, Pin.IN),  # IR Sensor 1 (Leftmost)
+    Pin(3, Pin.IN),  # IR Sensor 2
+    Pin(4, Pin.IN),  # IR Sensor 3 (Center)
+    Pin(5, Pin.IN),  # IR Sensor 4
+    Pin(6, Pin.IN)   # IR Sensor 5 (Rightmost)
+]
+
+# MOTOR DRIVER (Dual Channel - e.g., TB6612FNG or similar)
+# NOTE: Your list connects Standby (STBY) directly to 3.3V, so it's always on.
+#       This is a valid configuration for simplicity.
+
+# Left Motor (Motor A)
+ain1 = Pin(10, Pin.OUT)
+ain2 = Pin(11, Pin.OUT)
+pwma = PWM(Pin(12))
+
+# Right Motor (Motor B)
+bin1 = Pin(13, Pin.OUT)
+bin2 = Pin(14, Pin.OUT)
+# CRITICAL NOTE: Your list has GP15 going to "PWMA". This is assumed to be a typo.
+# This code assumes GP15 is correctly wired to the Right Motor's PWM pin (PWMB).
+pwmb = PWM(Pin(15))
+
+# Set the frequency for the PWM motor control signals. 1000 Hz is common.
+pwma.freq(1000)
+pwmb.freq(1000)
+
+
+# ====================================================================================
+# PERFORMANCE TUNING & PID CONSTANTS
+# ====================================================================================
+# --- This is the most critical section for achieving speed and accuracy! ---
+# You MUST tune these values for your robot's specific weight, motors, and surface.
+#
+# HOW TO TUNE:
+# 1. Set Ki and Kd to 0. Start with a small Kp (e.g., 0.4).
+# 2. Increase Kp until the robot follows the line but oscillates (weaves back and forth).
+# 3. Increase Kd to dampen the oscillations until it runs smoothly.
+# 4. If the robot has a consistent error on one side (e.g., always drifts left on a
+#    straight line), add a very small Ki (e.g., 0.01) to correct for it.
+
+PROPORTIONAL_GAIN = 0.6   # (Kp) Reacts to the PRESENT error. Higher value = sharper turns.
+INTEGRAL_GAIN     = 0.02  # (Ki) Corrects accumulated PAST errors (e.g., motor imbalances).
+DERIVATIVE_GAIN   = 0.3   # (Kd) Predicts FUTURE error, dampens oscillations.
+
+# --- SPEED CONTROL ---
+# The speed is set as a 16-bit integer (0-65535).
+# Start with a lower BASE_SPEED for easier tuning, then increase for performance.
+BASE_SPEED = 25000  # The robot's default forward speed.
+MAX_SPEED  = 45000  # The maximum allowable speed for any motor.
+
+# --- PID Calculation Variables ---
+last_error = 0
+integral = 0
+
+# ====================================================================================
+# CORE LOGIC FUNCTIONS
+# ====================================================================================
+
+def set_motor_speeds(left_speed, right_speed):
+    """
+    Controls the speed and direction of both motors.
+    - Clamps the speed values to prevent overflow and ensure they are within the
+      valid PWM range [0, MAX_SPEED].
+    - Sets motor direction pins based on positive (forward) or negative (backward) speed.
+    """
+    # Clamp speeds to the allowable range
+    left_speed = max(-MAX_SPEED, min(MAX_SPEED, int(left_speed)))
+    right_speed = max(-MAX_SPEED, min(MAX_SPEED, int(right_speed)))
+
+    # --- Control Left Motor (A) ---
+    if left_speed > 0:
+        ain1.high()
+        ain2.low()
+        pwma.duty_u16(left_speed)
+    elif left_speed < 0:
+        ain1.low()
+        ain2.high()
+        pwma.duty_u16(abs(left_speed))
+    else: # Stop
+        ain1.low()
+        ain2.low()
+        pwma.duty_u16(0)
+
+    # --- Control Right Motor (B) ---
+    if right_speed > 0:
+        bin1.high()
+        bin2.low()
+        pwmb.duty_u16(right_speed)
+    elif right_speed < 0:
+        bin1.low()
+        bin2.high()
+        pwmb.duty_u16(abs(right_speed))
+    else: # Stop
+        bin1.low()
+        bin2.low()
+        pwmb.duty_u16(0)
+
+
+def calculate_error():
+    """
+    Reads the IR sensors and calculates the robot's position relative to the line.
+    - Assumes black line on a white surface (sensor reads 0 on black, 1 on white).
+    - Uses a weighted average for a precise error value, essential for smooth PID control.
+    - Returns an error value, where:
+        - 0 means the robot is perfectly centered on the line.
+        - Negative values mean the robot is to the right of the line.
+        - Positive values mean the robot is to the left of the line.
+    """
+    global last_error
+    sensor_values = [pin.value() for pin in sensor_pins]
+
+    # Weighted values for each sensor. These can be tuned for more/less aggressive response.
+    # [Leftmost, Left, Center, Right, Rightmost]
+    weights = [4, 2, 0, -2, -4]
+
+    # --- Advanced Error Calculation ---
+    numerator = 0
+    denominator = 0
+    line_detected = False
+
+    for i, value in enumerate(sensor_values):
+        if value == 0:  # Sensor detects the black line
+            numerator += weights[i]
+            denominator += 1
+            line_detected = True
+
+    if not line_detected:
+        # If the line is completely lost, use the last known error to guide the robot
+        # back. A value of >4 or <-4 indicates a full turn is needed.
+        if last_error > 2:
+            return 5 # Turn hard left
+        elif last_error < -2:
+            return -5 # Turn hard right
+        else: # If lost from center, just use last error.
+            return last_error
+
+    # Return the precise, weighted error value
+    return numerator / denominator
+
+
+# ====================================================================================
+# MAIN EXECUTION LOOP
+# ====================================================================================
+
+def run_robot():
+    """
+    The main control loop that executes the line-following logic.
+    """
+    global last_error, integral
+
+    print("Robot starting in 3 seconds... Place it on the track!")
+    time.sleep(3)
+    print("GO!")
+
+    try:
+        while True:
+            # 1. Calculate Error: Determine the robot's position relative to the line.
+            error = calculate_error()
+
+            # 2. Calculate PID Terms
+            proportional = PROPORTIONAL_GAIN * error
+            integral += error
+            integral_term = INTEGRAL_GAIN * integral
+            derivative = error - last_error
+            derivative_term = DERIVATIVE_GAIN * derivative
+
+            # 3. Calculate Correction: Sum the PID terms to get the required adjustment.
+            #    This value dictates the intensity and direction of the turn.
+            correction = proportional + integral_term + derivative_term
+
+            # 4. Determine Motor Speeds: Apply the correction to the base speed.
+            #    To turn left, we slow down the left motor and speed up the right.
+            #    To turn right, we do the opposite.
+            left_motor_speed = BASE_SPEED - correction
+            right_motor_speed = BASE_SPEED + correction
+
+            # 5. Command Motors: Send the calculated speeds to the motors.
+            set_motor_speeds(left_motor_speed, right_motor_speed)
+
+            # 6. Update State: Save the current error for the next loop's derivative calculation.
+            last_error = error
+
+            # This optional delay can prevent the loop from running too fast,
+            # which can sometimes help with stability. Test with and without it.
+            # time.sleep_ms(10)
+
+    except KeyboardInterrupt:
+        # Graceful shutdown: If the program is stopped (e.g., via Thonny),
+        # ensure the motors are turned off completely.
+        print("Shutdown signal received. Stopping motors.")
+        set_motor_speeds(0, 0)
+
+
+# --- Start the robot ---
+if __name__ == "__main__":
+    run_robot()
