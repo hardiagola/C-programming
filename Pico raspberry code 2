@@ -1,0 +1,140 @@
+# ====================================================================================
+#  SPEED & ACCURACY CODE: High-Performance PID Line Following Robot
+#  Platform:    Raspberry Pi Pico (MicroPython)
+#  Author:      [Mastermind Coder]
+#  Version:     4.0 (Performance Focus)
+#  Date:        2025-09-19
+#  Description: This version removes all maze-solving logic to focus exclusively on
+#               achieving maximum speed, accuracy, and smoothness on a standard
+#               line-following course. It uses an aggressive PID controller with
+#               dynamic speed adjustment.
+# ====================================================================================
+
+from machine import Pin, PWM
+import time
+
+# ====================================================================================
+# HARDWARE CONFIGURATION
+# ====================================================================================
+sensor_pins = [Pin(2, Pin.IN), Pin(3, Pin.IN), Pin(4, Pin.IN), Pin(5, Pin.IN), Pin(6, Pin.IN)]
+ain1, ain2 = Pin(10, Pin.OUT), Pin(11, Pin.OUT)
+pwma = PWM(Pin(12))
+bin1, bin2 = Pin(13, Pin.OUT), Pin(14, Pin.OUT)
+pwmb = PWM(Pin(15))
+pwma.freq(1000)
+pwmb.freq(1000)
+
+# ====================================================================================
+# PERFORMANCE TUNING & PID CONSTANTS (AGGRESSIVE)
+# ====================================================================================
+# These values are tuned for fast response. Calibrate them on your track.
+# The goal is to find the highest Kp you can handle, then use Kd to smooth it out.
+PROPORTIONAL_GAIN = 0.9   # (Kp) High value for immediate, strong error correction.
+INTEGRAL_GAIN     = 0.05  # (Ki) Helps correct minor, persistent drifts.
+DERIVATIVE_GAIN   = 0.4   # (Kd) Crucial for preventing overshoot and smoothing turns at high speed.
+
+# --- DYNAMIC SPEED CONTROL ---
+CRUISE_SPEED = 45000  # Target speed for straight sections. Push this as high as you can!
+TURNING_SPEED = 28000 # Base speed when making a turn. Keep it high enough for momentum.
+MAX_SPEED  = 65000    # The absolute maximum PWM duty cycle for any motor.
+
+# --- PID Calculation Variables ---
+last_error = 0
+integral = 0
+
+# ====================================================================================
+# CORE MOTOR & SENSOR FUNCTIONS
+# ====================================================================================
+
+def set_motor_speeds(left_speed, right_speed):
+    """Controls the speed and direction of both motors."""
+    left_speed = max(-MAX_SPEED, min(MAX_SPEED, int(left_speed)))
+    right_speed = max(-MAX_SPEED, min(MAX_SPEED, int(right_speed)))
+    # Motor A (Left)
+    if left_speed > 0: ain1.high(); ain2.low(); pwma.duty_u16(left_speed)
+    elif left_speed < 0: ain1.low(); ain2.high(); pwma.duty_u16(abs(left_speed))
+    else: ain1.low(); ain2.low(); pwma.duty_u16(0)
+    # Motor B (Right)
+    if right_speed > 0: bin1.high(); bin2.low(); pwmb.duty_u16(right_speed)
+    elif right_speed < 0: bin1.low(); bin2.high(); pwmb.duty_u16(abs(right_speed))
+    else: bin1.low(); bin2.low(); pwmb.duty_u16(0)
+
+def calculate_error():
+    """Reads sensors and calculates a precise error value using aggressive weights."""
+    global last_error
+    sensor_values = [pin.value() for pin in sensor_pins]
+
+    # Aggressive weights give a stronger signal for small deviations.
+    weights = [5, 3, 0, -3, -5]
+
+    numerator = 0
+    denominator = 0
+    line_detected = False
+
+    for i, value in enumerate(sensor_values):
+        if value == 0:  # Sensor detects the black line
+            numerator += weights[i]
+            denominator += 1
+            line_detected = True
+
+    if not line_detected:
+        # If line is lost, use the last known error to try to recover.
+        return 6 if last_error > 0 else -6
+
+    return numerator / denominator
+
+
+# ====================================================================================
+# MAIN EXECUTION LOOP (PERFORMANCE FOCUSED)
+# ====================================================================================
+
+def run_robot():
+    """The main control loop with dynamic speed adjustment."""
+    global last_error, integral
+
+    print("Performance Code V4.0 Initializing...")
+    print("Robot starting in 3 seconds. Place it on the track!")
+    time.sleep(3)
+    print("GO!")
+
+    try:
+        while True:
+            error = calculate_error()
+
+            # --- Dynamic Speed Logic ---
+            # If the error is small (on a straight), use high cruise speed.
+            # If the error grows (entering a turn), smoothly reduce speed.
+            current_base_speed = CRUISE_SPEED if abs(error) < 1.0 else TURNING_SPEED
+
+            # --- High-Performance PID Calculation ---
+            proportional = PROPORTIONAL_GAIN * error
+            integral += error
+            derivative = error - last_error
+
+            correction = proportional + (INTEGRAL_GAIN * integral) + (DERIVATIVE_GAIN * derivative)
+
+            # --- Motor Speed Calculation ---
+            left_motor_speed = current_base_speed - correction
+            right_motor_speed = current_base_speed + correction
+
+            set_motor_speeds(left_motor_speed, right_motor_speed)
+            last_error = error
+
+            # Detect the finish line (a thick line that covers all sensors)
+            if not any([pin.value() for pin in sensor_pins]):
+                time.sleep(0.05) # debounce
+                if not any([pin.value() for pin in sensor_pins]):
+                    print("Finish Line Detected!")
+                    break
+
+    except KeyboardInterrupt:
+        print("Shutdown signal received.")
+    finally:
+        # This will run on graceful exit or interrupt to ensure motors stop.
+        set_motor_speeds(0, 0)
+        print("Motors stopped.")
+
+
+# --- Start the robot ---
+if __name__ == "__main__":
+    run_robot()
